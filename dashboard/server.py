@@ -719,6 +719,8 @@ class _Throttle:
 class DashboardServer:
 
     def __init__(self):
+        if not _DEPS_OK:
+            raise RuntimeError("Install dashboard dependencies from requirements.txt (FastAPI and Uvicorn).")
         self._ip                          = _local_ip()
         # token -> issued-at. A set had no way to expire anything; this does,
         # and `_auth` sweeps as it reads so nothing has to run a timer.
@@ -1224,11 +1226,6 @@ class DashboardServer:
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
-        if not _DEPS_OK:
-            print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
-            print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
-            return
-
         # Startup only CHECKS — see report_network_access for why it never
         # asks for administrator rights here. In a thread: reading the
         # firewall rules takes about a second.

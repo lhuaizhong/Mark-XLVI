@@ -1522,10 +1522,17 @@ class JarvisLive:
             )
 
     async def _listen_audio(self):
-        print("[JARVIS] 🎤 Mic started")
-        loop = asyncio.get_event_loop()
+        from providers.audio import resample
 
-        def callback(indata, frames, time_info, status):
+        loop = asyncio.get_running_loop()
+        mic_rate = SEND_SAMPLE_RATE
+
+        def callback(buffer, frames, time_info, status):
+            indata = np.frombuffer(buffer, dtype=np.int16)
+            if mic_rate != SEND_SAMPLE_RATE:
+                pcm = resample(indata.astype("<i2", copy=False).tobytes(),
+                               mic_rate, SEND_SAMPLE_RATE)
+                indata = np.frombuffer(pcm, dtype="<i2")
             # ── Wake-word gate ───────────────────────────────────────────────
             # While asleep, the mic audio NEVER goes to Gemini (nothing is
             # streamed, so JARVIS can't respond to speech not addressed to it and
@@ -1601,13 +1608,8 @@ class JarvisLive:
 
         try:
             def _open_mic(dev):
-                return sd.InputStream(
-                    samplerate=SEND_SAMPLE_RATE,
-                    channels=CHANNELS,
-                    dtype="int16",
-                    blocksize=CHUNK_SIZE,
-                    device=dev,
-                    callback=callback,
+                return audio_devices.open_input_stream(
+                    dev, SEND_SAMPLE_RATE, CHUNK_SIZE, callback
                 )
 
             # Which microphone. resolve() returns None for "system default" and
@@ -1633,13 +1635,14 @@ class JarvisLive:
                 )
                 _mic_stream = _open_mic(None)
 
+            mic_rate = round(_mic_stream.samplerate)
             with _mic_stream:
-                print("[JARVIS] 🎤 Mic stream open")
+                print(f"[JARVIS] 🎤 Mic stream open at {mic_rate} Hz")
                 while True:
                     await asyncio.sleep(0.1)
         except Exception as e:
             print(f"[JARVIS] ❌ Mic: {e}")
-            raise
+            self.ui.write_log(f"ERR: Microphone unavailable: {e}. You can still type.")
 
     async def _flush_pending_vision(self) -> bool:
         """Send a captured frame immediately after its tool response.

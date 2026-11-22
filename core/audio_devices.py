@@ -25,6 +25,7 @@ WHY THIS IS CACHED
 
 from __future__ import annotations
 
+from math import gcd
 import threading
 import time
 from typing import Optional
@@ -157,12 +158,9 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
             def _cb(indata, n, *_a):
                 frames[0] += n
 
-            st = sd.InputStream(samplerate=rate, channels=1, dtype="int16",
-                                blocksize=1024, device=idx, callback=_cb)
-            st.start()
-            time.sleep(secs)
-            st.stop(); st.close()
-            ok = frames[0] > rate * secs * 0.3
+            with open_input_stream(idx, rate, 1024, _cb) as stream:
+                time.sleep(secs)
+            ok = frames[0] > stream.samplerate * secs * 0.3
             if not ok:
                 print(f"[Audio] input: host API delivered {frames[0]} frames in "
                       f"{secs*1000:.0f} ms — skipping it")
@@ -208,6 +206,32 @@ def configure(input_rate: int, output_rate: int) -> None:
         _cache = None
 
 
+def open_input_stream(device, rate: int, blocksize: int, callback):
+    """Open a mono PCM16 microphone, falling back to its default sample rate."""
+    import sounddevice as sd
+
+    def open_at(sample_rate, frames):
+        return sd.RawInputStream(samplerate=sample_rate, channels=1, dtype="int16",
+                                 blocksize=frames, device=device, callback=callback)
+
+    try:
+        return open_at(rate, blocksize)
+    except sd.PortAudioError as exc:
+        if exc.args[1:2] != (-9997,):  # paInvalidSampleRate
+            raise
+        native_rate = round(sd.query_devices(device, "input")["default_samplerate"])
+        if native_rate <= 0 or native_rate == rate:
+            raise
+
+    # Keep blocks close to the requested duration. Align them to whole
+    # samples at both rates when the ratio allows it without a long buffer.
+    native_frames = max(1, round(blocksize * native_rate / rate))
+    alignment = native_rate // gcd(native_rate, rate)
+    if alignment <= native_frames:
+        native_frames = alignment * round(native_frames / alignment)
+    return open_at(native_rate, native_frames)
+
+
 def _usable(idx: int, kind: str) -> bool:
     """Can this device actually be opened at the rate we need?
 
@@ -221,9 +245,7 @@ def _usable(idx: int, kind: str) -> bool:
         import sounddevice as sd
         rate = _RATES.get(kind, 16000)
         if kind == "input":
-            st = sd.InputStream(samplerate=rate, channels=1, dtype="int16",
-                                blocksize=1024, device=idx,
-                                callback=lambda *_a: None)
+            st = open_input_stream(idx, rate, 1024, lambda *_a: None)
         else:
             st = sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16",
                                     blocksize=1024, device=idx)
@@ -477,7 +499,8 @@ def measure_input(name: str, seconds: float = 3.0, on_level=None) -> dict:
         rate = _RATES.get("input", 16000)
 
         def _cb(indata, _frames, _t, _status):
-            block = int(np.abs(np.frombuffer(indata, dtype="int16")).max())                 if len(indata) else 0
+            samples = np.frombuffer(indata, dtype=np.int16).astype(np.int32)
+            block = int(np.abs(samples).max()) if samples.size else 0
             if block > peak_seen[0]:
                 peak_seen[0] = block
             if on_level is not None:
@@ -486,9 +509,7 @@ def measure_input(name: str, seconds: float = 3.0, on_level=None) -> dict:
                 except Exception:
                     pass
 
-        stream = sd.RawInputStream(samplerate=rate, channels=1, dtype="int16",
-                                   blocksize=int(rate / 20), device=idx,
-                                   callback=_cb)
+        stream = open_input_stream(idx, rate, rate // 20, _cb)
         with stream:
             time.sleep(max(0.5, float(seconds)))
         peak = peak_seen[0]
